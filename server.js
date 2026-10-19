@@ -1,0 +1,25 @@
+const waiting=[];
+const players=new Map();
+const matches=new Map();
+const MOVE_IDS=new Set(["punch","flee","block","cursed-energy-punch","basic-rct","normal-rct","advanced-rct","tech-ratio","tech-legacy","tech-blood","tech-boogie","tech-speech","tech-projection","tech-yuta","tech-shadows","tech-transfiguration","tech-limitless","tech-shrine"]);
+const TECH_DAMAGE={"tech-ratio":17,"tech-legacy":18,"tech-blood":18,"tech-boogie":21,"tech-speech":22,"tech-projection":25,"tech-yuta":27,"tech-shadows":32,"tech-transfiguration":34,"tech-limitless":40,"tech-shrine":44};
+function send(player,message){try{player.conn.send(message);}catch{}}
+function setState(match,log){for(const player of match.players){const other=match.players[1-player.slot];send(player,{type:"state",youHp:player.hp,opponentHp:other.hp,yourTurn:match.turn===player.slot,log});}}
+function finish(match,winner,reason){if(!match||!matches.has(match.id))return;for(const player of match.players){send(player,{type:"finished",won:player===winner,reason});player.matchId=null;}matches.delete(match.id);}
+function removeWaiting(id){const index=waiting.indexOf(id);if(index>=0)waiting.splice(index,1);}
+function pairPlayers(a,b){const id=Math.random().toString(36).slice(2)+Date.now().toString(36),match={id,players:[a,b],turn:0};matches.set(id,match);a.matchId=id;b.matchId=id;a.slot=0;b.slot=1;a.hp=100;b.hp=100;for(const player of match.players){const opponent=match.players[1-player.slot];send(player,{type:"matched",matchId:id,you:{id:player.conn.id,username:player.conn.username||"Sorcerer",hp:player.hp},opponent:{id:opponent.conn.id,username:opponent.conn.username||"Opponent",hp:opponent.hp},yourTurn:player.slot===match.turn});}}
+export default{async fetch(request){const url=new URL(request.url);if(request.method==="GET"&&url.pathname==="/api/arena")return Response.json({available:true,mode:"realtime-turn-based"});return new Response("Not found",{status:404});}};
+export const room={
+ async onConnect(conn){const player={conn,moves:new Set(),matchId:null,slot:-1,hp:100,blocked:false,queued:false};players.set(conn.id,player);send(player,{type:"ready"});},
+ async onMessage(conn,message){const player=players.get(conn.id);if(!player)return;let data;try{data=typeof message==="string"?JSON.parse(message):message;}catch{return;}if(!data||typeof data.type!=="string")return;
+  if(data.type==="queue"){if(player.matchId)return;if(player.queued){send(player,{type:"queued"});return;}player.moves=new Set(Array.isArray(data.moves)?data.moves.filter(id=>MOVE_IDS.has(id)).slice(0,8):[]);if(!player.moves.has("punch"))player.moves.add("punch");player.queued=true;let opponentId;while(waiting.length&&!opponentId){const id=waiting.shift(),candidate=players.get(id);if(candidate&&candidate.queued&&!candidate.matchId)opponentId=id;}if(opponentId){const opponent=players.get(opponentId);player.queued=false;opponent.queued=false;pairPlayers(opponent,player);}else{waiting.push(conn.id);send(player,{type:"queued"});}return;}
+  if(data.type==="leave"){if(player.queued){player.queued=false;removeWaiting(conn.id);send(player,{type:"left-queue"});return;}if(player.matchId){const match=matches.get(player.matchId),opponent=match?.players[1-player.slot];if(match)finish(match,opponent,"Your opponent left the duel.");}return;}
+  if(data.type!=="action"||!player.matchId)return;const match=matches.get(player.matchId);if(!match||match.turn!==player.slot||typeof data.move!=="string"||!player.moves.has(data.move))return;const opponent=match.players[1-player.slot],move=data.move;let log="";
+  if(move==="flee"){finish(match,opponent,"Your opponent fled the duel.");return;}
+  if(move==="block"){player.blocked=true;log=(conn.username||"Sorcerer")+" braces for the next hit.";}
+  else if(move==="basic-rct"||move==="normal-rct"||move==="advanced-rct"){const amount=move==="basic-rct"?20:move==="normal-rct"?35:55,healed=Math.min(amount,100-player.hp);player.hp+=healed;log=(conn.username||"Sorcerer")+" restores "+healed+" HP.";}
+  else{let damage=move==="punch"?15:move==="cursed-energy-punch"?22:(TECH_DAMAGE[move]||18);const critChance=move==="cursed-energy-punch"?.12:move==="punch"?.02:0;if(critChance&&Math.random()<critChance){damage*=3;log="BLACK FLASH! ";}const taken=opponent.blocked?Math.ceil(damage*.2):damage;opponent.blocked=false;opponent.hp=Math.max(0,opponent.hp-taken);log+=(conn.username||"Sorcerer")+" hits for "+taken+" damage.";}
+  if(opponent.hp<=0){finish(match,player,"Exorcism complete.");return;}match.turn=opponent.slot;setState(match,log);
+ },
+ async onClose(conn){const player=players.get(conn.id);if(!player)return;if(player.queued){player.queued=false;removeWaiting(conn.id);}if(player.matchId){const match=matches.get(player.matchId),opponent=match?.players[1-player.slot];if(match)finish(match,opponent,"Your opponent disconnected.");}players.delete(conn.id);}
+};
